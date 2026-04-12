@@ -20,6 +20,10 @@ import { deviceCache } from './services/deviceCache';
 const app = express();
 const server = createServer(app);
 
+// Trust the first proxy hop — required for Railway (and any reverse proxy) so that
+// express-rate-limit can read X-Forwarded-For without throwing ERR_ERL_UNEXPECTED_X_FORWARDED_FOR
+app.set('trust proxy', 1);
+
 // WebSocket server — only accepts connections on /ws path (see upgrade handler below)
 const wss = new WebSocketServer({ noServer: true });
 
