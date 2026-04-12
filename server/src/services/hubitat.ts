@@ -98,7 +98,16 @@ class HubitatClient {
     const path = value !== undefined
       ? `/devices/${deviceId}/${command}/${encodeURIComponent(String(value))}`
       : `/devices/${deviceId}/${command}`;
-    await this.fetchJson<unknown>(path);
+    const url = this.buildUrl(path);
+    console.log(`[hubitat] sendCommand URL: ${url}`);
+    const response = await fetch(url, {
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) {
+      throw new Error(`Hubitat command error: ${response.status} ${response.statusText}`);
+    }
+    // Consume body but don't parse — command responses may not be JSON
+    await response.text();
   }
 }
 

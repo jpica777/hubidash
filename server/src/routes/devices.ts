@@ -39,8 +39,11 @@ router.post('/devices/:id/command', async (req: Request, res: Response) => {
     return res.status(400).json({ error: 'command is required' });
   }
 
+  const deviceId = req.params.id;
+  console.log(`[devices] sendCommand → deviceId=${deviceId} command=${command} value=${value ?? '(none)'}`);
+
   try {
-    await hubitatClient.sendCommand(req.params.id, command, value);
+    await hubitatClient.sendCommand(deviceId, command, value);
     return res.json({ success: true });
   } catch (err) {
     console.error('[devices] Error sending command:', err);
