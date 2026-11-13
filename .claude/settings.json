@@ -3,7 +3,8 @@
     "allow": [
       "Bash(npm install:*)",
       "Bash(npm run:*)",
-      "Bash(timeout 5 bash -c ':*)"
+      "Bash(timeout 5 bash -c ':*)",
+      "Bash(openssl rand:*)"
     ]
   }
 }

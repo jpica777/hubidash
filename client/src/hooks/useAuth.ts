@@ -1,69 +1,98 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import type { HubitatMode } from '../types/devices';
+
+export type AuthStatus = 'checking' | 'unauthenticated' | 'authenticated';
 
 interface AuthState {
-  isAuthenticated: boolean;
-  isLoading: boolean;
+  status: AuthStatus;
   wsToken: string | null;
+  mode: HubitatMode | null;
 }
 
-export function useAuth() {
-  const [state, setState] = useState<AuthState>({
-    isAuthenticated: false,
-    isLoading: true,
-    wsToken: null,
-  });
+interface AuthResponse {
+  authenticated?: boolean;
+  wsToken?: string;
+  mode?: HubitatMode;
+  error?: string;
+}
 
-  const checkAuth = useCallback(async () => {
+export interface AuthApi extends AuthState {
+  /** Resolves to null on success, or an error message. */
+  login: (password: string) => Promise<string | null>;
+  logout: () => Promise<void>;
+  /** Call when the server reports the session is gone (401 / WS auth failure). */
+  expire: () => void;
+}
+
+const SIGNED_OUT: AuthState = { status: 'unauthenticated', wsToken: null, mode: null };
+
+async function readJson(res: Response): Promise<AuthResponse> {
+  try {
+    return (await res.json()) as AuthResponse;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Session state for the whole app. Instantiate exactly once, at the App root,
+ * and pass values down as props.
+ */
+export function useAuth(): AuthApi {
+  const [state, setState] = useState<AuthState>({ status: 'checking', wsToken: null, mode: null });
+
+  const checkSession = useCallback(async (signal?: AbortSignal) => {
     try {
-      const res = await fetch('/api/me', { credentials: 'include' });
-      if (res.ok) {
-        const data = (await res.json()) as { authenticated: boolean; wsToken: string };
-        setState({ isAuthenticated: true, isLoading: false, wsToken: data.wsToken });
+      const res = await fetch('/api/me', { credentials: 'same-origin', signal });
+      const data = await readJson(res);
+      if (res.ok && data.authenticated && data.wsToken) {
+        setState({ status: 'authenticated', wsToken: data.wsToken, mode: data.mode ?? null });
       } else {
-        setState({ isAuthenticated: false, isLoading: false, wsToken: null });
+        setState(SIGNED_OUT);
       }
-    } catch {
-      setState({ isAuthenticated: false, isLoading: false, wsToken: null });
+    } catch (err) {
+      if ((err as Error).name !== 'AbortError') setState(SIGNED_OUT);
     }
   }, []);
 
+  // Session restore on page load.
   useEffect(() => {
-    checkAuth();
-  }, [checkAuth]);
+    const controller = new AbortController();
+    void checkSession(controller.signal);
+    return () => controller.abort();
+  }, [checkSession]);
 
-  const login = useCallback(async (password: string): Promise<boolean> => {
+  const login = useCallback(async (password: string): Promise<string | null> => {
     try {
       const res = await fetch('/api/login', {
         method: 'POST',
+        credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
         body: JSON.stringify({ password }),
       });
-      if (res.ok) {
-        const data = (await res.json()) as { success: boolean; wsToken: string };
-        setState({ isAuthenticated: true, isLoading: false, wsToken: data.wsToken });
-        return true;
+      const data = await readJson(res);
+      if (res.ok && data.wsToken) {
+        setState({ status: 'authenticated', wsToken: data.wsToken, mode: data.mode ?? null });
+        return null;
       }
-      return false;
+      return data.error ?? (res.status === 401 ? 'Incorrect password' : `Login failed (${res.status})`);
     } catch {
-      return false;
+      return 'Unable to reach the server';
     }
   }, []);
 
   const logout = useCallback(async () => {
     try {
-      await fetch('/api/logout', { method: 'POST', credentials: 'include' });
-    } catch {
-      // ignore
+      await fetch('/api/logout', { method: 'POST', credentials: 'same-origin' });
+    } finally {
+      setState(SIGNED_OUT);
     }
-    setState({ isAuthenticated: false, isLoading: false, wsToken: null });
   }, []);
 
-  return {
-    isAuthenticated: state.isAuthenticated,
-    isLoading: state.isLoading,
-    wsToken: state.wsToken,
-    login,
-    logout,
-  };
+  const expire = useCallback(() => {
+    // Double-check with the server; a transient WS close shouldn't log the user out.
+    void checkSession();
+  }, [checkSession]);
+
+  return { ...state, login, logout, expire };
 }

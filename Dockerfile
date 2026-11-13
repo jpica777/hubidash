@@ -1,48 +1,40 @@
-# ── Stage 1: Build ────────────────────────────────────────────────────────────
-FROM node:20-alpine AS builder
+# syntax=docker/dockerfile:1
 
+# ---------- Stage 1: build client + server ----------
+FROM node:20-alpine AS build
 WORKDIR /app
 
-# Copy workspace manifests first for better layer caching
-COPY package.json package-lock.json* ./
-COPY client/package.json ./client/
-COPY server/package.json ./server/
+COPY package.json package-lock.json ./
+COPY client/package.json client/
+COPY server/package.json server/
+RUN npm ci
 
-# Install ALL dependencies (including devDeps needed for build)
-RUN npm ci --ignore-scripts
-
-# Copy source
-COPY client ./client
-COPY server ./server
 COPY tsconfig.json ./
+COPY client client
+COPY server server
 
-# Build React SPA → /app/dist/
-RUN npm run build -w client
+RUN npm run build --workspace=client \
+ && npm run build --workspace=server
 
-# Compile server TypeScript → /app/server/dist/
-RUN npm run build -w server
-
-# ── Stage 2: Runtime ──────────────────────────────────────────────────────────
+# ---------- Stage 2: runtime ----------
 FROM node:20-alpine AS runtime
-
+ENV NODE_ENV=production
 WORKDIR /app
 
-# Copy workspace manifests and install only production deps
-COPY package.json package-lock.json* ./
-COPY client/package.json ./client/
-COPY server/package.json ./server/
-RUN npm ci --omit=dev --ignore-scripts
+COPY package.json package-lock.json ./
+COPY client/package.json client/
+COPY server/package.json server/
+RUN npm ci --omit=dev && npm cache clean --force
 
-# Copy compiled artifacts from builder
-COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/server/dist ./server/dist
+COPY --from=build /app/client/dist client/dist
+COPY --from=build /app/server/dist server/dist
 
-# Non-root user for security
-RUN addgroup -S hubidash && adduser -S hubidash -G hubidash
-USER hubidash
+RUN chown -R node:node /app
+USER node
 
 EXPOSE 3001
 
-ENV NODE_ENV=production
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget -qO- "http://127.0.0.1:${PORT:-3001}/api/health" > /dev/null || exit 1
 
 CMD ["node", "server/dist/index.js"]

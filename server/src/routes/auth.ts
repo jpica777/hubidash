@@ -1,65 +1,82 @@
-import { Router, Request, Response } from 'express';
+import { Router } from 'express';
 import bcrypt from 'bcryptjs';
-import crypto from 'crypto';
-import { registerWsToken, revokeWsToken } from '../services/wsManager';
-import { authMiddleware } from '../middleware/auth';
+import { v4 as uuidv4 } from 'uuid';
+import { loginLimiter } from '../middleware/rateLimit.js';
+import type { HubitatMode } from '../types/index.js';
 
-const router = Router();
-
-const rawPassword = process.env.AUTH_PASSWORD;
-if (!rawPassword) {
-  throw new Error('AUTH_PASSWORD environment variable is required');
+interface AuthRouterOptions {
+  passwordHash: string;
+  mode: HubitatMode;
+  cookieName: string;
+  revokeWsToken: (token: string) => void;
 }
 
-const hashedPassword = bcrypt.hashSync(rawPassword, 10);
+export function createAuthRouter({ passwordHash, mode, cookieName, revokeWsToken }: AuthRouterOptions): Router {
+  const router = Router();
 
-router.post('/login', async (req: Request, res: Response) => {
-  const { password } = req.body as { password?: string };
+  router.post('/login', loginLimiter, async (req, res, next) => {
+    try {
+      const body: unknown = req.body;
+      const password =
+        body && typeof body === 'object' && typeof (body as { password?: unknown }).password === 'string'
+          ? (body as { password: string }).password
+          : '';
 
-  if (!password) {
-    return res.status(400).json({ error: 'Password is required' });
-  }
+      if (!password || password.length > 1024) {
+        res.status(400).json({ error: 'Password is required' });
+        return;
+      }
 
-  try {
-    const isValid = await bcrypt.compare(password, hashedPassword);
-    if (!isValid) {
-      return res.status(401).json({ error: 'Invalid password' });
+      const valid = await bcrypt.compare(password, passwordHash);
+      if (!valid) {
+        res.status(401).json({ error: 'Incorrect password' });
+        return;
+      }
+
+      const previousToken = req.session.wsToken;
+      // Regenerate to prevent session fixation.
+      req.session.regenerate((regenErr) => {
+        if (regenErr) {
+          next(regenErr);
+          return;
+        }
+        if (previousToken) revokeWsToken(previousToken);
+        const wsToken = uuidv4();
+        req.session.authenticated = true;
+        req.session.wsToken = wsToken;
+        req.session.save((saveErr) => {
+          if (saveErr) {
+            next(saveErr);
+            return;
+          }
+          res.json({ authenticated: true, wsToken, mode });
+        });
+      });
+    } catch (err) {
+      next(err);
     }
+  });
 
-    // Generate a WS token tied to this session
-    const wsToken = crypto.randomBytes(32).toString('hex');
-    req.session.authenticated = true;
-    req.session.wsToken = wsToken;
-    registerWsToken(wsToken);
+  router.post('/logout', (req, res, next) => {
+    const token = req.session.wsToken;
+    req.session.destroy((err) => {
+      if (err) {
+        next(err);
+        return;
+      }
+      if (token) revokeWsToken(token);
+      res.clearCookie(cookieName, { path: '/' });
+      res.json({ authenticated: false });
+    });
+  });
 
-    return res.json({ success: true, wsToken });
-  } catch (err) {
-    console.error('[auth] Login error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-router.post('/logout', authMiddleware, (req: Request, res: Response) => {
-  const wsToken = req.session.wsToken;
-  if (wsToken) revokeWsToken(wsToken);
-
-  req.session.destroy((err) => {
-    if (err) {
-      console.error('[auth] Logout error:', err);
-      return res.status(500).json({ error: 'Failed to logout' });
+  router.get('/me', (req, res) => {
+    if (req.session.authenticated === true && req.session.wsToken) {
+      res.json({ authenticated: true, wsToken: req.session.wsToken, mode });
+      return;
     }
-    res.clearCookie('connect.sid');
-    return res.json({ success: true });
+    res.status(401).json({ authenticated: false });
   });
-});
 
-// Used by the client on load to verify an existing session is still valid
-// and to retrieve the WS token without logging in again
-router.get('/me', authMiddleware, (req: Request, res: Response) => {
-  return res.json({
-    authenticated: true,
-    wsToken: req.session.wsToken,
-  });
-});
-
-export default router;
+  return router;
+}

@@ -1,54 +1,75 @@
-import { DeviceCategory } from '../types/devices';
+import type { CategoryFilter } from '../types/devices';
 
-interface FilterBarProps {
-  selectedCategory: DeviceCategory;
-  onCategoryChange: (category: DeviceCategory) => void;
-  searchQuery: string;
-  onSearchChange: (query: string) => void;
-}
-
-const CATEGORIES: { value: DeviceCategory; label: string; icon: string }[] = [
-  { value: 'all', label: 'All', icon: '⊞' },
-  { value: 'lights', label: 'Lights', icon: '💡' },
-  { value: 'sensors', label: 'Sensors', icon: '📡' },
-  { value: 'locks', label: 'Locks', icon: '🔒' },
-  { value: 'climate', label: 'Climate', icon: '🌡️' },
-  { value: 'other', label: 'Other', icon: '📱' },
+const TABS: Array<{ id: CategoryFilter; label: string }> = [
+  { id: 'all', label: 'All' },
+  { id: 'lights', label: 'Lights' },
+  { id: 'sensors', label: 'Sensors' },
+  { id: 'locks', label: 'Locks' },
+  { id: 'climate', label: 'Climate' },
+  { id: 'other', label: 'Other' },
 ];
 
-export default function FilterBar({
-  selectedCategory,
-  onCategoryChange,
-  searchQuery,
-  onSearchChange,
-}: FilterBarProps) {
+interface FilterBarProps {
+  category: CategoryFilter;
+  onCategoryChange: (category: CategoryFilter) => void;
+  search: string;
+  onSearchChange: (search: string) => void;
+  counts: Record<CategoryFilter, number>;
+}
+
+export function FilterBar({ category, onCategoryChange, search, onSearchChange, counts }: FilterBarProps) {
   return (
-    <div className="mb-6 space-y-3">
-      <div className="flex flex-wrap gap-2">
-        {CATEGORIES.map(({ value, label, icon }) => (
-          <button
-            key={value}
-            type="button"
-            onClick={() => onCategoryChange(value)}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors duration-150 ${
-              selectedCategory === value
-                ? 'bg-accent text-white'
-                : 'bg-surface-2 border border-border text-muted hover:text-white hover:border-accent/40'
-            }`}
-          >
-            <span>{icon}</span>
-            <span>{label}</span>
-          </button>
-        ))}
+    <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+      <div
+        role="tablist"
+        aria-label="Device categories"
+        className="-mx-4 flex gap-1.5 overflow-x-auto px-4 pb-1 md:mx-0 md:px-0 md:pb-0"
+      >
+        {TABS.map((tab) => {
+          const selected = tab.id === category;
+          return (
+            <button
+              key={tab.id}
+              type="button"
+              role="tab"
+              aria-selected={selected}
+              onClick={() => onCategoryChange(tab.id)}
+              className={`flex shrink-0 items-center gap-2 rounded-full border px-3.5 py-1.5 text-sm transition-all duration-300 ease-in-out ${
+                selected
+                  ? 'border-accent/50 bg-accent/20 text-white'
+                  : 'border-white/10 bg-white/[0.03] text-slate-400 hover:bg-white/[0.07] hover:text-slate-200'
+              }`}
+            >
+              {tab.label}
+              <span className={`font-mono text-xs tabular-nums ${selected ? 'text-accent-soft' : 'text-slate-500'}`}>
+                {counts[tab.id]}
+              </span>
+            </button>
+          );
+        })}
       </div>
 
-      <input
-        type="search"
-        placeholder="Search devices…"
-        value={searchQuery}
-        onChange={(e) => onSearchChange(e.target.value)}
-        className="w-full max-w-xs px-4 py-2 rounded-lg bg-surface-2 border border-border text-white placeholder-muted/50 text-sm focus:outline-none focus:ring-2 focus:ring-accent/50 focus:border-accent/50 transition"
-      />
+      <div className="relative md:w-72">
+        <svg
+          viewBox="0 0 24 24"
+          className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={2}
+          aria-hidden="true"
+        >
+          <circle cx="11" cy="11" r="7" />
+          <path d="m20 20-3.5-3.5" />
+        </svg>
+        <input
+          type="search"
+          value={search}
+          onChange={(e) => onSearchChange(e.target.value)}
+          placeholder="Search devices…"
+          aria-label="Search devices by name"
+          className="w-full rounded-xl border border-white/10 bg-white/[0.04] py-2 pl-9 pr-3 text-sm text-slate-100 placeholder:text-slate-500 transition-all duration-300 ease-in-out focus:border-accent/50 focus:bg-white/[0.06]"
+        />
+      </div>
     </div>
   );
 }

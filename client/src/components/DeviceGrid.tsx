@@ -1,32 +1,25 @@
-import { Device, CommandRequest } from '../types/devices';
-import DeviceCard from './DeviceCard';
+import type { CommandFn, Device } from '../types/devices';
+import { DeviceCard } from './DeviceCard';
 
 interface DeviceGridProps {
   devices: Device[];
-  onSendCommand: (deviceId: string, cmd: CommandRequest) => Promise<boolean>;
-  stale?: boolean;
+  onCommand: CommandFn;
+  emptyMessage: string;
 }
 
-export default function DeviceGrid({ devices, onSendCommand, stale }: DeviceGridProps) {
+export function DeviceGrid({ devices, onCommand, emptyMessage }: DeviceGridProps) {
   if (devices.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center py-20 text-center">
-        <span className="text-4xl mb-4">📡</span>
-        <p className="text-muted">No devices found</p>
-        <p className="text-xs text-muted/60 mt-1">Try adjusting your filter or search term</p>
+      <div className="glass flex flex-col items-center justify-center gap-2 px-6 py-16 text-center animate-fade-in">
+        <p className="text-slate-300">{emptyMessage}</p>
       </div>
     );
   }
 
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
       {devices.map((device) => (
-        <DeviceCard
-          key={device.id}
-          device={device}
-          onSendCommand={(cmd: CommandRequest) => onSendCommand(device.id, cmd)}
-          stale={stale}
-        />
+        <DeviceCard key={device.id} device={device} onCommand={onCommand} />
       ))}
     </div>
   );

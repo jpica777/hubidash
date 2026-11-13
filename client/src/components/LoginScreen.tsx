@@ -1,62 +1,71 @@
-import { useState, FormEvent } from 'react';
+import { useState, type FormEvent } from 'react';
 
 interface LoginScreenProps {
-  onLogin: (password: string) => Promise<boolean>;
+  onLogin: (password: string) => Promise<string | null>;
 }
 
-export default function LoginScreen({ onLogin }: LoginScreenProps) {
+export function LoginScreen({ onLogin }: LoginScreenProps) {
   const [password, setPassword] = useState('');
-  const [error, setError] = useState('');
-  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    setError('');
-    setLoading(true);
-    const ok = await onLogin(password);
-    if (!ok) setError('Invalid password. Please try again.');
-    setLoading(false);
+    if (!password || submitting) return;
+    setSubmitting(true);
+    setError(null);
+    const result = await onLogin(password);
+    if (result) {
+      setError(result);
+      setPassword('');
+      setSubmitting(false);
+    }
   };
 
   return (
-    <div className="min-h-screen bg-background flex items-center justify-center px-4">
-      <div className="w-full max-w-sm">
-        <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-accent/20 border border-accent/30 mb-4">
-            <span className="text-3xl">🏠</span>
+    <div className="flex min-h-screen items-center justify-center px-4">
+      <form onSubmit={(e) => void handleSubmit(e)} className="glass w-full max-w-sm p-8 shadow-2xl animate-fade-in">
+        <div className="mb-8 text-center">
+          <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-accent/15 text-accent">
+            <svg viewBox="0 0 24 24" className="h-6 w-6" fill="none" stroke="currentColor" strokeWidth={2} strokeLinejoin="round" aria-hidden="true">
+              <path d="M4 11 12 4l8 7v9H4z" />
+              <path d="M10 20v-5h4v5" />
+            </svg>
           </div>
-          <h1 className="text-2xl font-semibold text-white">HubiDash</h1>
-          <p className="text-sm text-muted mt-1">Hubitat smart home dashboard</p>
+          <h1 className="text-2xl font-bold tracking-tight text-white">
+            Hubi<span className="text-accent">Dash</span>
+          </h1>
+          <p className="mt-1 text-sm text-slate-400">Enter your password to continue</p>
         </div>
 
-        <form onSubmit={handleSubmit} className="glass rounded-2xl p-6 space-y-4">
-          <div>
-            <label htmlFor="password" className="block text-sm text-muted mb-1.5">
-              Password
-            </label>
-            <input
-              id="password"
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="Enter dashboard password"
-              autoFocus
-              required
-              className="w-full px-4 py-2.5 rounded-lg bg-surface-2 border border-border text-white placeholder-muted/50 focus:outline-none focus:ring-2 focus:ring-accent/60 focus:border-accent/60 transition"
-            />
-          </div>
+        <label htmlFor="password" className="sr-only">
+          Password
+        </label>
+        <input
+          id="password"
+          type="password"
+          autoComplete="current-password"
+          autoFocus
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          placeholder="Password"
+          aria-invalid={error ? true : undefined}
+          aria-describedby={error ? 'login-error' : undefined}
+          className={`w-full rounded-xl border bg-white/[0.04] px-4 py-3 text-slate-100 placeholder:text-slate-500 transition-all duration-300 ease-in-out focus:bg-white/[0.06] ${
+            error ? 'border-rose-500/60' : 'border-white/10 focus:border-accent/50'
+          }`}
+        />
 
-          {error && <p className="text-sm text-red-400 text-center">{error}</p>}
+        {error && (
+          <p id="login-error" role="alert" className="mt-2 text-sm text-rose-300">
+            {error}
+          </p>
+        )}
 
-          <button
-            type="submit"
-            disabled={loading || !password}
-            className="w-full py-2.5 px-4 rounded-lg bg-accent text-white font-medium hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-200"
-          >
-            {loading ? 'Signing in…' : 'Sign in'}
-          </button>
-        </form>
-      </div>
+        <button type="submit" disabled={!password || submitting} className="btn-primary mt-6 w-full py-3">
+          {submitting ? 'Signing in…' : 'Sign in'}
+        </button>
+      </form>
     </div>
   );
 }

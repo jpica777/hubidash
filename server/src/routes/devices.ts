@@ -1,54 +1,63 @@
-import { Router, Request, Response } from 'express';
-import { hubitatClient } from '../services/hubitat';
-import { deviceCache } from '../services/deviceCache';
+import { Router } from 'express';
+import { requireAuth } from '../middleware/auth.js';
+import type { DeviceCache } from '../services/deviceCache.js';
+import { HubitatError, type HubitatClient } from '../services/hubitat.js';
+import { CommandError, executeCommand, isValidDeviceId, parseCommandInput } from '../services/commands.js';
 
-const router = Router();
+export function createDevicesRouter(client: HubitatClient, cache: DeviceCache): Router {
+  const router = Router();
+  router.use(requireAuth);
 
-router.get('/devices', async (_req: Request, res: Response) => {
-  try {
-    const devices = await hubitatClient.getAllDevices();
-    await deviceCache.updateDevices(devices);
-    return res.json(devices);
-  } catch (err) {
-    console.error('[devices] Error fetching all devices:', err);
-    const cached = deviceCache.getCachedState();
-    if (cached.devices.length > 0) {
-      return res.json(cached.devices.map((d) => ({ ...d, stale: true })));
+  router.get('/', async (_req, res, next) => {
+    try {
+      const snapshot = await cache.getSnapshot();
+      if (!cache.hasData) {
+        res.status(502).json({ error: 'Hub unreachable and no cached state available', ...snapshot });
+        return;
+      }
+      res.json(snapshot);
+    } catch (err) {
+      next(err);
     }
-    return res.status(502).json({ error: 'Hub unreachable and no cached state available' });
-  }
-});
+  });
 
-router.get('/devices/:id', async (req: Request, res: Response) => {
-  try {
-    const device = await hubitatClient.getDevice(req.params.id);
-    return res.json(device);
-  } catch (err) {
-    console.error('[devices] Error fetching device:', err);
-    // Fall back to cache
-    const cached = deviceCache.getCachedState().devices.find((d) => d.id === req.params.id);
-    if (cached) return res.json({ ...cached, stale: true });
-    return res.status(404).json({ error: 'Device not found' });
-  }
-});
+  router.get('/:id', async (req, res, next) => {
+    const { id } = req.params;
+    if (!isValidDeviceId(id)) {
+      res.status(400).json({ error: 'Invalid device id' });
+      return;
+    }
+    try {
+      const device = await client.getDevice(id);
+      res.json({ device, stale: false });
+    } catch (err) {
+      if (err instanceof HubitatError) {
+        const cached = cache.get(id);
+        if (cached) {
+          res.json({ device: cached, stale: true });
+          return;
+        }
+        res.status(err.status === 404 ? 404 : 502).json({ error: err.message });
+        return;
+      }
+      next(err);
+    }
+  });
 
-router.post('/devices/:id/command', async (req: Request, res: Response) => {
-  const { command, value } = req.body as { command?: string; value?: string | number };
+  router.post('/:id/command', async (req, res, next) => {
+    try {
+      const body = (req.body ?? {}) as { command?: unknown; value?: unknown };
+      const input = parseCommandInput(req.params.id, body.command, body.value);
+      await executeCommand(client, cache, input);
+      res.json({ ok: true });
+    } catch (err) {
+      if (err instanceof CommandError) {
+        res.status(err.status).json({ ok: false, error: err.message });
+        return;
+      }
+      next(err);
+    }
+  });
 
-  if (!command) {
-    return res.status(400).json({ error: 'command is required' });
-  }
-
-  const deviceId = req.params.id;
-  console.log(`[devices] sendCommand → deviceId=${deviceId} command=${command} value=${value ?? '(none)'}`);
-
-  try {
-    await hubitatClient.sendCommand(deviceId, command, value);
-    return res.json({ success: true });
-  } catch (err) {
-    console.error('[devices] Error sending command:', err);
-    return res.status(502).json({ error: 'Failed to send command to hub' });
-  }
-});
-
-export default router;
+  return router;
+}

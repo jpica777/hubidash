@@ -1,115 +1,126 @@
-import dotenv from 'dotenv';
-dotenv.config();
-
-import express, { Request, Response } from 'express';
+import fs from 'node:fs';
+import http from 'node:http';
+import path from 'node:path';
+import express, { type NextFunction, type Request, type Response } from 'express';
 import session from 'express-session';
-import cors from 'cors';
-import path from 'path';
-import { createServer, IncomingMessage } from 'http';
-import { Duplex } from 'stream';
-import { WebSocket, WebSocketServer } from 'ws';
+import bcrypt from 'bcryptjs';
+import { ConfigError, loadConfig, type AppConfig } from './config.js';
+import { HubitatClient } from './services/hubitat.js';
+import { DeviceCache } from './services/deviceCache.js';
+import { WsManager } from './services/wsManager.js';
+import { apiLimiter } from './middleware/rateLimit.js';
+import { createAuthRouter } from './routes/auth.js';
+import { createDevicesRouter } from './routes/devices.js';
+import { createHealthRouter } from './routes/health.js';
 
-import authRoutes from './routes/auth';
-import deviceRoutes from './routes/devices';
-import healthRoutes from './routes/health';
-import { authMiddleware } from './middleware/auth';
-import { rateLimitMiddleware } from './middleware/rateLimit';
-import { wsManager } from './services/wsManager';
-import { deviceCache } from './services/deviceCache';
+const SESSION_COOKIE = 'hubidash.sid';
+const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+
+let config: AppConfig;
+try {
+  config = loadConfig();
+} catch (err) {
+  if (err instanceof ConfigError) {
+    console.error(`[config] ${err.message}`);
+    console.error('[config] See .env.example for the full list of variables.');
+    process.exit(1);
+  }
+  throw err;
+}
+
+const port = parseInt(process.env.PORT || '3001', 10);
+
+const hubitat = new HubitatClient(config.hubitat);
+const cache = new DeviceCache(hubitat, config.pollIntervalMs);
+const passwordHash = bcrypt.hashSync(config.authPassword, 10);
+const sessionStore = new session.MemoryStore();
 
 const app = express();
-const server = createServer(app);
-
-// Trust the first proxy hop — required for Railway (and any reverse proxy) so that
-// express-rate-limit can read X-Forwarded-For without throwing ERR_ERL_UNEXPECTED_X_FORWARDED_FOR
+// Railway (and most PaaS / NAS reverse proxies) sit in front of us. Must be set before
+// any middleware, otherwise express-rate-limit rejects every request that carries X-Forwarded-For.
 app.set('trust proxy', 1);
+app.disable('x-powered-by');
 
-// WebSocket server — only accepts connections on /ws path (see upgrade handler below)
-const wss = new WebSocketServer({ noServer: true });
-
-// ── Middleware ────────────────────────────────────────────────────────────────
-
-app.use(
-  cors({
-    origin: process.env.NODE_ENV === 'production' ? false : true,
-    credentials: true,
-  })
-);
-app.use(express.json());
+app.use(express.json({ limit: '10kb' }));
 app.use(
   session({
-    secret: process.env.SESSION_SECRET || 'change-me-in-production',
+    name: SESSION_COOKIE,
+    secret: config.sessionSecret,
+    store: sessionStore,
     resave: false,
     saveUninitialized: false,
+    rolling: true,
     cookie: {
-      secure: process.env.NODE_ENV === 'production',
       httpOnly: true,
+      // 'auto' => Secure whenever the request arrived over HTTPS (Railway, via trust proxy),
+      // plain cookie on http://localhost / LAN so local development keeps working.
+      secure: 'auto',
       sameSite: 'lax',
-      maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
+      maxAge: THIRTY_DAYS_MS,
     },
-  })
+  }),
 );
 
-// Rate limit all /api routes
-app.use('/api', rateLimitMiddleware);
+const wsManager = new WsManager({ sessionStore, cache, client: hubitat });
 
-// ── Routes ────────────────────────────────────────────────────────────────────
+app.use('/api', apiLimiter);
+app.use('/api', createHealthRouter(hubitat.mode));
+app.use(
+  '/api',
+  createAuthRouter({
+    passwordHash,
+    mode: hubitat.mode,
+    cookieName: SESSION_COOKIE,
+    revokeWsToken: (token) => wsManager.revokeToken(token),
+  }),
+);
+app.use('/api/devices', createDevicesRouter(hubitat, cache));
+app.use('/api', (_req, res) => {
+  res.status(404).json({ error: 'Not found' });
+});
 
-app.use('/api', authRoutes);
-app.use('/api', authMiddleware, deviceRoutes);
-app.use('/api', healthRoutes);
-
-// ── Static (React SPA) ────────────────────────────────────────────────────────
-// In production: __dirname = /app/server/dist/ → ../../dist = /app/dist/ (Vite output)
-const distPath = path.join(__dirname, '../../dist');
-app.use(express.static(distPath));
-
-app.get('*', (_req: Request, res: Response) => {
-  res.sendFile(path.join(distPath, 'index.html'), (err: NodeJS.ErrnoException) => {
-    if (err) {
-      res.status(404).json({ error: 'Client not built. Run: npm run build -w client' });
+// Serve the built React SPA.
+const indexHtml = path.join(config.clientDistDir, 'index.html');
+if (fs.existsSync(indexHtml)) {
+  app.use(
+    '/assets',
+    express.static(path.join(config.clientDistDir, 'assets'), { immutable: true, maxAge: '1y', fallthrough: false }),
+  );
+  app.use(express.static(config.clientDistDir, { index: false, maxAge: '1h' }));
+  app.use((req, res, next) => {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      next();
+      return;
     }
+    res.setHeader('Cache-Control', 'no-cache');
+    res.sendFile(indexHtml);
   });
-});
+} else {
+  console.warn(`[server] client build not found at ${config.clientDistDir} — API only (use the Vite dev server for the UI)`);
+}
 
-// ── WebSocket upgrade (only /ws) ──────────────────────────────────────────────
-
-server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
-  if (req.url === '/ws') {
-    wss.handleUpgrade(req, socket, head, (ws: WebSocket) => {
-      wss.emit('connection', ws, req);
-    });
-  } else {
-    socket.destroy();
+app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+  const status = (err as { status?: number; statusCode?: number })?.status ?? (err as { statusCode?: number })?.statusCode;
+  if (typeof status === 'number' && status >= 400 && status < 500) {
+    res.status(status).json({ error: status === 404 ? 'Not found' : 'Bad request' });
+    return;
   }
+  console.error('[server] unhandled error:', err);
+  res.status(500).json({ error: 'Internal server error' });
 });
 
-wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
-  wsManager.handleConnection(ws, req);
+const server = http.createServer(app);
+wsManager.attach(server);
+
+server.listen(port, '0.0.0.0', () => {
+  console.log(`[server] HubiDash listening on port ${port} (${hubitat.mode} mode, poll ${config.pollIntervalMs}ms)`);
 });
 
-// ── Boot ──────────────────────────────────────────────────────────────────────
-
-const PORT = Number(process.env.PORT) || 3001;
-
-server.listen(PORT, () => {
-  console.log(`[HubiDash] Server listening on port ${PORT}`);
-  console.log(`[HubiDash] Hubitat mode: ${process.env.HUBITAT_MODE || 'local'}`);
-
-  wsManager.initialize();
-
-  try {
-    deviceCache.startPolling();
-  } catch (err: unknown) {
-    console.error(
-      '[HubiDash] Failed to start polling:',
-      err instanceof Error ? err.message : err
-    );
-    console.error('[HubiDash] Check your HUBITAT_* environment variables.');
-  }
-});
-
-server.on('error', (err: Error) => {
-  console.error('[HubiDash] Server error:', err);
-  process.exit(1);
-});
+function shutdown(signal: string): void {
+  console.log(`[server] ${signal} received, shutting down`);
+  wsManager.close();
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 5_000).unref();
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));

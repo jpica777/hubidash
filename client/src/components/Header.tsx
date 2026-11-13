@@ -1,68 +1,56 @@
-import { WsConnectionStatus } from '../types/devices';
+import type { ConnectionStatus, HubitatMode } from '../types/devices';
+import { formatTime } from '../utils/deviceHelpers';
 
 interface HeaderProps {
-  wsStatus: WsConnectionStatus;
-  lastUpdated: Date;
+  mode: HubitatMode | null;
+  connection: ConnectionStatus;
+  lastUpdated: string | null;
   stale: boolean;
   onLogout: () => void;
 }
 
-function formatTime(date: Date): string {
-  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-}
+const CONNECTION_STYLES: Record<ConnectionStatus, { dot: string; label: string }> = {
+  live: { dot: 'bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.8)]', label: 'Live' },
+  connecting: { dot: 'bg-amber-400 animate-pulse', label: 'Connecting' },
+  reconnecting: { dot: 'bg-amber-400 animate-pulse', label: 'Reconnecting' },
+  disconnected: { dot: 'bg-rose-500', label: 'Disconnected' },
+};
 
-const MODE = import.meta.env.VITE_HUBITAT_MODE as string | undefined;
-
-export default function Header({ wsStatus, lastUpdated, stale, onLogout }: HeaderProps) {
-  const dotColor =
-    wsStatus === 'connected'
-      ? 'bg-green-400'
-      : wsStatus === 'reconnecting' || wsStatus === 'connecting'
-      ? 'bg-yellow-400 animate-pulse'
-      : 'bg-red-500';
-
-  const statusLabel =
-    wsStatus === 'connected'
-      ? 'Live'
-      : wsStatus === 'reconnecting'
-      ? 'Reconnecting…'
-      : wsStatus === 'connecting'
-      ? 'Connecting…'
-      : 'Disconnected';
-
-  const modeLabel = MODE === 'cloud' ? '☁ Cloud' : '⌂ Local';
+export function Header({ mode, connection, lastUpdated, stale, onLogout }: HeaderProps) {
+  const conn = CONNECTION_STYLES[connection];
 
   return (
-    <header className="bg-surface border-b border-border px-4 py-3">
-      <div className="container mx-auto flex items-center justify-between gap-4">
-        {/* Left */}
-        <div className="flex items-center gap-3 min-w-0">
-          <h1 className="text-xl font-semibold text-white tracking-tight shrink-0">HubiDash</h1>
-
-          <span className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-surface-2 border border-border text-xs text-muted shrink-0">
-            {modeLabel}
-          </span>
-
-          <div className="flex items-center gap-1.5 shrink-0">
-            <span className={`w-2 h-2 rounded-full ${dotColor}`} />
-            <span className="text-xs text-muted hidden sm:inline">{statusLabel}</span>
-          </div>
-
-          {stale && (
-            <span className="text-xs text-yellow-400 shrink-0">⚠ Stale data</span>
+    <header className="border-b border-white/[0.06] bg-base/70 backdrop-blur-md">
+      <div className="mx-auto flex max-w-screen-2xl flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 sm:px-6">
+        <div className="flex items-center gap-3">
+          <h1 className="text-xl font-bold tracking-tight text-white">
+            Hubi<span className="text-accent">Dash</span>
+          </h1>
+          {mode && (
+            <span className="rounded-full border border-accent/30 bg-accent/10 px-2.5 py-0.5 text-xs font-medium text-accent-soft">
+              {mode === 'cloud' ? '☁ Cloud' : '⌂ Local'}
+            </span>
           )}
         </div>
 
-        {/* Right */}
-        <div className="flex items-center gap-3 shrink-0">
-          <span className="text-xs text-muted hidden md:inline font-mono">
-            {formatTime(lastUpdated)}
-          </span>
-          <button
-            onClick={onLogout}
-            className="px-3 py-1.5 rounded-lg bg-surface-2 border border-border text-sm text-muted hover:text-white hover:border-accent transition-colors duration-200"
-          >
-            Logout
+        <div className="ml-auto flex items-center gap-4">
+          <div className="flex items-center gap-2 text-xs text-slate-400" title={`Connection: ${conn.label}`}>
+            <span className={`h-2.5 w-2.5 rounded-full transition-colors duration-300 ease-in-out ${conn.dot}`} />
+            <span className="hidden sm:inline">{conn.label}</span>
+          </div>
+          <div className="hidden text-xs text-slate-400 sm:block">
+            Updated <span className="font-mono tabular-nums text-slate-300">{formatTime(lastUpdated)}</span>
+          </div>
+          {stale && (
+            <span
+              className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-0.5 text-xs text-amber-200"
+              title="The hub is unreachable. Showing the last known state."
+            >
+              Hub offline
+            </span>
+          )}
+          <button type="button" onClick={onLogout} className="btn-ghost py-1.5 text-xs">
+            Log out
           </button>
         </div>
       </div>

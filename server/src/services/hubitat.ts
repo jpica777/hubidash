@@ -1,114 +1,201 @@
-import { Device, HubitatRawDevice, HubitatRawAttribute } from '../types/index';
+import type { AttributeValue, Device, HubitatMode } from '../types/index.js';
 
-function normalizeDevice(raw: HubitatRawDevice): Device {
-  const attributes: Record<string, string | number | boolean | null> = {};
-  if (Array.isArray(raw.attributes)) {
-    for (const attr of raw.attributes) {
-      attributes[attr.name] = attr.currentValue;
-    }
-  } else if (raw.attributes && typeof raw.attributes === 'object') {
-    // Already a map (some Hubitat firmware versions return this format)
-    const attrMap = raw.attributes as unknown as Record<string, HubitatRawAttribute>;
-    for (const [key, val] of Object.entries(attrMap)) {
-      attributes[key] = typeof val === 'object' && val !== null
-        ? (val as HubitatRawAttribute).currentValue
-        : val as string | number | boolean | null;
-    }
-  }
+export type HubitatOptions =
+  | { mode: 'local'; host: string; appId: string; accessToken: string }
+  | { mode: 'cloud'; hubId: string; appId: string; cloudToken: string };
 
-  const commands: string[] = Array.isArray(raw.commands)
-    ? raw.commands.map((c) => (typeof c === 'string' ? c : c.command))
-    : [];
-
-  return {
-    id: String(raw.id),
-    name: raw.name || '',
-    label: raw.label || raw.name || '',
-    type: raw.type || '',
-    capabilities: Array.isArray(raw.capabilities) ? raw.capabilities : [],
-    attributes,
-    commands,
-  };
+export interface DeviceSummary {
+  id: string;
+  name: string;
+  label: string;
+  type: string;
+  room: string | null;
 }
 
-class HubitatClient {
-  private baseUrl: string;
-  private token: string;
-  private mode: 'local' | 'cloud';
+export class HubitatError extends Error {
+  constructor(
+    message: string,
+    readonly status?: number,
+  ) {
+    super(message);
+    this.name = 'HubitatError';
+  }
+}
 
-  constructor() {
-    this.mode = (process.env.HUBITAT_MODE as 'local' | 'cloud') || 'local';
+const REQUEST_TIMEOUT_MS = 10_000;
 
-    if (this.mode === 'cloud') {
-      const hubId = process.env.HUBITAT_HUB_ID;
-      const appId = process.env.HUBITAT_APP_ID;
-      this.token = process.env.HUBITAT_CLOUD_TOKEN || '';
-      if (!hubId || !appId || !this.token) {
-        throw new Error('HUBITAT_HUB_ID, HUBITAT_APP_ID, and HUBITAT_CLOUD_TOKEN are required in cloud mode');
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function toAttributeValue(value: unknown): AttributeValue {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return value;
+  return JSON.stringify(value);
+}
+
+function describeError(err: unknown): string {
+  if (err instanceof Error) {
+    if (err.name === 'TimeoutError') return 'request timed out';
+    const cause = (err as Error & { cause?: unknown }).cause;
+    if (cause instanceof Error && cause.message) return `${err.message} (${cause.message})`;
+    return err.message;
+  }
+  return String(err);
+}
+
+/**
+ * Normalizes the varied Maker API device shapes into a single Device type.
+ * - /devices/all: attributes is an object map, capabilities mixes strings and objects
+ * - /devices/{id}: attributes is an array of { name, currentValue }
+ * - commands may be strings or { command } objects
+ */
+export function normalizeDevice(raw: unknown): Device | null {
+  const r = asRecord(raw);
+  if (!r || r.id === undefined || r.id === null) return null;
+
+  const id = String(r.id);
+  const name = typeof r.name === 'string' && r.name.trim() ? r.name : `Device ${id}`;
+  const label = typeof r.label === 'string' && r.label.trim() ? r.label : name;
+  const type = typeof r.type === 'string' ? r.type : '';
+  const room = typeof r.room === 'string' && r.room.trim() ? r.room : null;
+
+  const capabilities = Array.isArray(r.capabilities)
+    ? r.capabilities.filter((c): c is string => typeof c === 'string')
+    : [];
+
+  const attributes: Record<string, AttributeValue> = {};
+  if (Array.isArray(r.attributes)) {
+    for (const entry of r.attributes) {
+      const attr = asRecord(entry);
+      if (attr && typeof attr.name === 'string') {
+        attributes[attr.name] = toAttributeValue(attr.currentValue);
       }
-      this.baseUrl = `https://cloud.hubitat.com/api/${hubId}/apps/${appId}`;
-    } else {
-      const host = process.env.HUBITAT_HOST;
-      const appId = process.env.HUBITAT_APP_ID;
-      this.token = process.env.HUBITAT_ACCESS_TOKEN || '';
-      if (!host || !appId || !this.token) {
-        throw new Error('HUBITAT_HOST, HUBITAT_APP_ID, and HUBITAT_ACCESS_TOKEN are required in local mode');
+    }
+  } else {
+    const attrMap = asRecord(r.attributes);
+    if (attrMap) {
+      for (const [key, value] of Object.entries(attrMap)) {
+        attributes[key] = toAttributeValue(value);
       }
-      this.baseUrl = `${host}/apps/api/${appId}`;
     }
   }
 
-  getMode(): 'local' | 'cloud' {
-    return this.mode;
+  const commands = Array.isArray(r.commands)
+    ? r.commands
+        .map((c) => (typeof c === 'string' ? c : asRecord(c)?.command))
+        .filter((c): c is string => typeof c === 'string' && c.length > 0)
+    : [];
+
+  return { id, name, label, type, room, capabilities, attributes, commands: [...new Set(commands)] };
+}
+
+/**
+ * Thin client over the Hubitat Maker API. Works identically against the hub on the LAN
+ * (local mode) or through cloud.hubitat.com (cloud mode); only the base URL and token differ.
+ * All Maker API calls — including commands — are HTTP GET.
+ */
+export class HubitatClient {
+  readonly mode: HubitatMode;
+  private readonly baseUrl: string;
+  private readonly token: string;
+
+  constructor(options: HubitatOptions) {
+    this.mode = options.mode;
+    if (options.mode === 'local') {
+      const host = options.host.replace(/\/+$/, '');
+      this.baseUrl = `${host}/apps/api/${options.appId}`;
+      this.token = options.accessToken;
+    } else {
+      this.baseUrl = `https://cloud.hubitat.com/api/${options.hubId}/apps/${options.appId}`;
+      this.token = options.cloudToken;
+    }
   }
 
   private buildUrl(path: string): string {
-    const sep = path.includes('?') ? '&' : '?';
-    return `${this.baseUrl}${path}${sep}access_token=${this.token}`;
+    return `${this.baseUrl}${path}?access_token=${encodeURIComponent(this.token)}`;
   }
 
-  private async fetchJson<T>(path: string): Promise<T> {
+  /** JSON GET for read endpoints only. Never used for commands. */
+  private async fetchJson(path: string): Promise<unknown> {
     const url = this.buildUrl(path);
-    const response = await fetch(url, {
-      headers: { Accept: 'application/json' },
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!response.ok) {
-      throw new Error(`Hubitat API error: ${response.status} ${response.statusText} for ${path}`);
+    let response: Response;
+    let body: string;
+    try {
+      response = await fetch(url, {
+        headers: { Accept: 'application/json' },
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+      body = await response.text();
+    } catch (err) {
+      throw new HubitatError(`Hub unreachable: ${describeError(err)}`);
     }
-    return response.json() as Promise<T>;
+    if (!response.ok) {
+      throw new HubitatError(`Hubitat API error: ${response.status} ${response.statusText}`, response.status);
+    }
+    try {
+      return JSON.parse(body) as unknown;
+    } catch {
+      throw new HubitatError('Hubitat returned a non-JSON response');
+    }
   }
 
+  /** GET /devices — lightweight list of all devices. */
+  async getDevices(): Promise<DeviceSummary[]> {
+    const data = await this.fetchJson('/devices');
+    if (!Array.isArray(data)) throw new HubitatError('Unexpected /devices response shape');
+    return data
+      .map(normalizeDevice)
+      .filter((d): d is Device => d !== null)
+      .map(({ id, name, label, type, room }) => ({ id, name, label, type, room }));
+  }
+
+  /** GET /devices/all — every device with full attribute detail. */
   async getAllDevices(): Promise<Device[]> {
-    // /devices/all returns full device detail including attributes
-    const raw = await this.fetchJson<HubitatRawDevice[]>('/devices/all');
-    return raw.map(normalizeDevice);
+    const data = await this.fetchJson('/devices/all');
+    if (!Array.isArray(data)) throw new HubitatError('Unexpected /devices/all response shape');
+    return data.map(normalizeDevice).filter((d): d is Device => d !== null);
   }
 
-  async getDevices(): Promise<Device[]> {
-    return this.getAllDevices();
-  }
-
+  /** GET /devices/{id} — single device detail + attributes. */
   async getDevice(deviceId: string): Promise<Device> {
-    const raw = await this.fetchJson<HubitatRawDevice>(`/devices/${deviceId}`);
-    return normalizeDevice(raw);
+    const device = normalizeDevice(await this.fetchJson(`/devices/${deviceId}`));
+    if (!device) throw new HubitatError(`Unexpected response for device ${deviceId}`);
+    return device;
   }
 
+  /** GET /devices/{id}/commands — available commands for a device. */
+  async getDeviceCommands(deviceId: string): Promise<string[]> {
+    const data = await this.fetchJson(`/devices/${deviceId}/commands`);
+    if (!Array.isArray(data)) throw new HubitatError('Unexpected commands response shape');
+    return data
+      .map((c) => (typeof c === 'string' ? c : asRecord(c)?.command))
+      .filter((c): c is string => typeof c === 'string');
+  }
+
+  /**
+   * GET /devices/{id}/{command}[/{value}] — execute a command.
+   * Plain GET, and the body is drained without parsing: Hubitat often returns
+   * non-JSON or empty bodies for commands.
+   */
   async sendCommand(deviceId: string, command: string, value?: string | number): Promise<void> {
-    const path = value !== undefined
-      ? `/devices/${deviceId}/${command}/${encodeURIComponent(String(value))}`
-      : `/devices/${deviceId}/${command}`;
+    const path =
+      value !== undefined
+        ? `/devices/${deviceId}/${command}/${encodeURIComponent(String(value))}`
+        : `/devices/${deviceId}/${command}`;
     const url = this.buildUrl(path);
-    console.log(`[hubitat] sendCommand URL: ${url}`);
-    const response = await fetch(url, {
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!response.ok) {
-      throw new Error(`Hubitat command error: ${response.status} ${response.statusText}`);
+    console.log('[hubitat] sendCommand:', url);
+    let response: Response;
+    try {
+      response = await fetch(url, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+    } catch (err) {
+      throw new HubitatError(`Hub unreachable: ${describeError(err)}`);
     }
-    // Consume body but don't parse — command responses may not be JSON
-    await response.text();
+    if (!response.ok) {
+      throw new HubitatError(`Hubitat command error: ${response.status} ${response.statusText}`, response.status);
+    }
+    await response.text(); // consume body without parsing
   }
 }
-
-export const hubitatClient = new HubitatClient();

@@ -1,85 +1,118 @@
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&display=swap');
-
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 @layer base {
-  *,
-  *::before,
-  *::after {
-    box-sizing: border-box;
-  }
-
   html {
-    font-family: 'DM Sans', system-ui, sans-serif;
-    -webkit-font-smoothing: antialiased;
-    -moz-osx-font-smoothing: grayscale;
+    color-scheme: dark;
+    -webkit-tap-highlight-color: transparent;
   }
 
   body {
-    margin: 0;
-    background-color: #0f0f1a;
-    color: #fff;
-    min-height: 100dvh;
+    @apply min-h-screen bg-base font-sans text-slate-200 antialiased;
+    background-image:
+      radial-gradient(1200px 600px at 10% -10%, rgba(108, 92, 231, 0.18), transparent 60%),
+      radial-gradient(900px 500px at 110% 10%, rgba(59, 130, 246, 0.1), transparent 60%);
+    background-attachment: fixed;
+  }
+
+  :focus-visible {
+    @apply outline-none ring-2 ring-accent/70 ring-offset-2 ring-offset-base;
   }
 }
 
 @layer components {
   .glass {
-    background: rgba(22, 22, 37, 0.7);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    @apply rounded-2xl border border-white/10 bg-white/[0.04] backdrop-blur-md;
   }
 
-  /* Geist Mono via system fallback — loaded via npm if available */
-  .font-mono {
-    font-family: 'Geist Mono', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'Consolas', monospace;
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl px-3.5 py-2 text-sm font-medium transition-all duration-300 ease-in-out disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .btn-ghost {
+    @apply btn border border-white/10 bg-white/[0.04] text-slate-200 hover:bg-white/[0.08];
+  }
+
+  .btn-primary {
+    @apply btn bg-accent-deep text-white hover:bg-accent;
+  }
+
+  .btn-danger {
+    @apply btn bg-rose-600 text-white hover:bg-rose-500;
   }
 }
 
-@layer utilities {
-  /* Smooth accent-colored range inputs across browsers */
-  input[type='range'] {
-    -webkit-appearance: none;
-    appearance: none;
-    background: transparent;
-  }
-  input[type='range']::-webkit-slider-runnable-track {
-    height: 6px;
-    border-radius: 9999px;
-    background: rgba(255, 255, 255, 0.08);
-  }
-  input[type='range']::-webkit-slider-thumb {
-    -webkit-appearance: none;
-    appearance: none;
-    width: 16px;
-    height: 16px;
-    margin-top: -5px;
-    border-radius: 9999px;
-    background: #5b6af5;
-    cursor: pointer;
-    transition: transform 0.15s;
-  }
-  input[type='range']::-webkit-slider-thumb:hover {
-    transform: scale(1.2);
-  }
-  input[type='range']:disabled::-webkit-slider-thumb {
-    background: rgba(255, 255, 255, 0.2);
-    cursor: not-allowed;
-  }
-  input[type='range']::-moz-range-track {
-    height: 6px;
-    border-radius: 9999px;
-    background: rgba(255, 255, 255, 0.08);
-  }
-  input[type='range']::-moz-range-thumb {
-    width: 16px;
-    height: 16px;
-    border: none;
-    border-radius: 9999px;
-    background: #5b6af5;
-    cursor: pointer;
+/* Range slider (dimmer) */
+input[type='range'].slider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 6px;
+  border-radius: 9999px;
+  background: linear-gradient(
+    to right,
+    rgb(139 124 246) 0%,
+    rgb(139 124 246) var(--fill, 0%),
+    rgba(255, 255, 255, 0.1) var(--fill, 0%),
+    rgba(255, 255, 255, 0.1) 100%
+  );
+  cursor: pointer;
+}
+
+input[type='range'].slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 9999px;
+  background: #fff;
+  box-shadow: 0 0 0 4px rgba(139, 124, 246, 0.35);
+  transition: box-shadow 0.3s ease;
+}
+
+input[type='range'].slider::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 9999px;
+  background: #fff;
+  box-shadow: 0 0 0 4px rgba(139, 124, 246, 0.35);
+}
+
+input[type='range'].slider:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* Color input */
+input[type='color'].swatch {
+  -webkit-appearance: none;
+  appearance: none;
+  border: none;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+input[type='color'].swatch::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+input[type='color'].swatch::-webkit-color-swatch {
+  border: 2px solid rgba(255, 255, 255, 0.2);
+  border-radius: 9999px;
+}
+
+input[type='color'].swatch::-moz-color-swatch {
+  border: 2px solid rgba(255, 255, 255, 0.2);
+  border-radius: 9999px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
   }
 }

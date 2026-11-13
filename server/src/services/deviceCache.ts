@@ -1,126 +1,169 @@
-import { Device, DeviceUpdate, CachedDeviceState } from '../types/index';
-import { hubitatClient } from './hubitat';
+import { EventEmitter } from 'node:events';
+import type { HubitatClient } from './hubitat.js';
+import type { CacheStatus, Device, DeviceChanges, DeviceSnapshot } from '../types/index.js';
 
-type ChangeListener = (updates: DeviceUpdate[]) => void;
-
-class DeviceCache {
-  private devices: Map<string, Device> = new Map();
-  private lastUpdated: number = 0;
-  private stale: boolean = false;
-  private listeners: Set<ChangeListener> = new Set();
-  private pollTimer: ReturnType<typeof setInterval> | null = null;
-
-  addChangeListener(fn: ChangeListener) {
-    this.listeners.add(fn);
-  }
-
-  removeChangeListener(fn: ChangeListener) {
-    this.listeners.delete(fn);
-  }
-
-  private notify(updates: DeviceUpdate[]) {
-    for (const fn of this.listeners) {
-      fn(updates);
-    }
-  }
-
-  getDevices(): Device[] {
-    return Array.from(this.devices.values());
-  }
-
-  getCachedState(): CachedDeviceState {
-    return {
-      devices: this.getDevices(),
-      lastUpdated: this.lastUpdated,
-      stale: this.stale,
-    };
-  }
-
-  async updateDevices(fresh: Device[]): Promise<DeviceUpdate[]> {
-    const updates: DeviceUpdate[] = [];
-
-    for (const device of fresh) {
-      const existing = this.devices.get(device.id);
-      if (!existing) {
-        // New device
-        this.devices.set(device.id, device);
-        updates.push({ id: device.id, attributes: device.attributes });
-        continue;
-      }
-
-      // Diff attributes
-      const changedAttrs: Record<string, string | number | boolean | null> = {};
-      let changed = false;
-
-      for (const [key, val] of Object.entries(device.attributes)) {
-        if (existing.attributes[key] !== val) {
-          changedAttrs[key] = val;
-          changed = true;
-        }
-      }
-
-      // Also check for removed attributes
-      for (const key of Object.keys(existing.attributes)) {
-        if (!(key in device.attributes)) {
-          changedAttrs[key] = null;
-          changed = true;
-        }
-      }
-
-      if (changed) {
-        this.devices.set(device.id, device);
-        updates.push({ id: device.id, attributes: changedAttrs });
-      }
-    }
-
-    // Remove devices no longer returned
-    const freshIds = new Set(fresh.map((d) => d.id));
-    for (const id of this.devices.keys()) {
-      if (!freshIds.has(id)) {
-        this.devices.delete(id);
-      }
-    }
-
-    this.lastUpdated = Date.now();
-    this.stale = false;
-
-    return updates;
-  }
-
-  markStale() {
-    this.stale = true;
-  }
-
-  startPolling() {
-    const mode = hubitatClient.getMode();
-    const intervalMs = mode === 'cloud' ? 8_000 : 5_000;
-
-    const poll = async () => {
-      try {
-        const fresh = await hubitatClient.getAllDevices();
-        const updates = await this.updateDevices(fresh);
-        if (updates.length > 0) {
-          this.notify(updates);
-        }
-      } catch (err) {
-        console.error('[DeviceCache] Poll error:', err instanceof Error ? err.message : err);
-        this.markStale();
-      }
-    };
-
-    // Initial fetch
-    poll();
-
-    this.pollTimer = setInterval(poll, intervalMs);
-    console.log(`[DeviceCache] Polling Hubitat every ${intervalMs / 1000}s (${mode} mode)`);
-  }
-
-  stopPolling() {
-    if (this.pollTimer) {
-      clearInterval(this.pollTimer);
-      this.pollTimer = null;
-    }
-  }
+function fingerprint(device: Device): string {
+  return JSON.stringify([
+    device.label,
+    device.name,
+    device.type,
+    device.room,
+    device.attributes,
+    device.commands,
+    device.capabilities,
+  ]);
 }
 
-export const deviceCache = new DeviceCache();
+export interface DeviceCacheEvents {
+  changes: [DeviceChanges];
+  status: [CacheStatus];
+}
+
+/**
+ * Holds the last known state of every device, polls the hub, and emits
+ * diffs. When the hub is unreachable the last known state is kept and
+ * flagged stale.
+ */
+export class DeviceCache extends EventEmitter<DeviceCacheEvents> {
+  private readonly devices = new Map<string, Device>();
+  private readonly fingerprints = new Map<string, string>();
+  private lastUpdated: Date | null = null;
+  private stale = false;
+  private inflight: Promise<boolean> | null = null;
+
+  private pollGeneration = 0;
+  private polling = false;
+  private pollTimer: NodeJS.Timeout | null = null;
+  private soonTimer: NodeJS.Timeout | null = null;
+
+  constructor(
+    private readonly client: HubitatClient,
+    readonly pollIntervalMs: number,
+  ) {
+    super();
+  }
+
+  get hasData(): boolean {
+    return this.lastUpdated !== null;
+  }
+
+  get(deviceId: string): Device | undefined {
+    return this.devices.get(deviceId);
+  }
+
+  status(): CacheStatus {
+    return { stale: this.stale, lastUpdated: this.lastUpdated?.toISOString() ?? null };
+  }
+
+  snapshot(): DeviceSnapshot {
+    return {
+      devices: [...this.devices.values()],
+      ...this.status(),
+      mode: this.client.mode,
+    };
+  }
+
+  private isFresh(): boolean {
+    return (
+      this.lastUpdated !== null &&
+      !this.stale &&
+      Date.now() - this.lastUpdated.getTime() < this.pollIntervalMs
+    );
+  }
+
+  /** Returns a snapshot, refreshing from the hub first if the cache is older than one poll interval. */
+  async getSnapshot(): Promise<DeviceSnapshot> {
+    if (!this.isFresh()) await this.refresh();
+    return this.snapshot();
+  }
+
+  /** Fetches all devices from the hub. Concurrent callers share one in-flight request. */
+  refresh(): Promise<boolean> {
+    if (!this.inflight) {
+      this.inflight = this.doRefresh().finally(() => {
+        this.inflight = null;
+      });
+    }
+    return this.inflight;
+  }
+
+  private async doRefresh(): Promise<boolean> {
+    try {
+      const devices = await this.client.getAllDevices();
+      const changed: Device[] = [];
+      const seen = new Set<string>();
+
+      for (const device of devices) {
+        seen.add(device.id);
+        const fp = fingerprint(device);
+        if (this.fingerprints.get(device.id) !== fp) {
+          this.fingerprints.set(device.id, fp);
+          changed.push(device);
+        }
+        this.devices.set(device.id, device);
+      }
+
+      const removed: string[] = [];
+      for (const id of this.devices.keys()) {
+        if (!seen.has(id)) removed.push(id);
+      }
+      for (const id of removed) {
+        this.devices.delete(id);
+        this.fingerprints.delete(id);
+      }
+
+      if (this.stale) console.log('[cache] hub reachable again');
+      this.stale = false;
+      this.lastUpdated = new Date();
+
+      if (changed.length > 0 || removed.length > 0) {
+        this.emit('changes', { changed, removed, ...this.status() });
+      } else {
+        this.emit('status', this.status());
+      }
+      return true;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (!this.stale) console.warn('[cache] hub refresh failed, serving last known state:', message);
+      this.stale = true;
+      this.emit('status', this.status());
+      return false;
+    }
+  }
+
+  startPolling(): void {
+    if (this.polling) return;
+    this.polling = true;
+    const generation = ++this.pollGeneration;
+    console.log(`[cache] polling every ${this.pollIntervalMs}ms`);
+
+    const tick = async (): Promise<void> => {
+      if (!this.polling || generation !== this.pollGeneration) return;
+      await this.refresh();
+      if (this.polling && generation === this.pollGeneration) {
+        this.pollTimer = setTimeout(() => void tick(), this.pollIntervalMs);
+      }
+    };
+    void tick();
+  }
+
+  stopPolling(): void {
+    if (!this.polling) return;
+    this.polling = false;
+    this.pollGeneration++;
+    if (this.pollTimer) clearTimeout(this.pollTimer);
+    if (this.soonTimer) clearTimeout(this.soonTimer);
+    this.pollTimer = null;
+    this.soonTimer = null;
+    console.log('[cache] polling paused (no live clients)');
+  }
+
+  /** Schedules a quick out-of-band refresh, e.g. right after a command so clients see the result fast. */
+  refreshSoon(delayMs = 1_200): void {
+    if (this.soonTimer) clearTimeout(this.soonTimer);
+    this.soonTimer = setTimeout(() => {
+      this.soonTimer = null;
+      void this.refresh();
+    }, delayMs);
+  }
+}

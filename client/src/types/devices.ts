@@ -1,44 +1,78 @@
+export type HubitatMode = 'local' | 'cloud';
+
+export type AttributeValue = string | number | boolean | null;
+
 export interface Device {
   id: string;
   name: string;
   label: string;
   type: string;
+  room: string | null;
   capabilities: string[];
-  attributes: Record<string, string | number | boolean | null>;
+  attributes: Record<string, AttributeValue>;
   commands: string[];
-  stale?: boolean;
 }
 
-export interface DeviceUpdate {
-  id: string;
-  attributes: Record<string, string | number | boolean | null>;
+export type DeviceKind =
+  | 'switch'
+  | 'dimmer'
+  | 'color'
+  | 'lock'
+  | 'thermostat'
+  | 'water'
+  | 'contact'
+  | 'motion'
+  | 'temperature'
+  | 'sensor'
+  | 'other';
+
+export type DeviceCategory = 'lights' | 'sensors' | 'locks' | 'climate' | 'other';
+
+export type CategoryFilter = 'all' | DeviceCategory;
+
+export type StatusTone = 'active' | 'neutral' | 'alert';
+
+export type ConnectionStatus = 'connecting' | 'live' | 'reconnecting' | 'disconnected';
+
+export interface DeviceAlert {
+  deviceId: string;
+  deviceName: string;
+  kind: 'water' | 'battery' | 'smoke' | 'co' | 'unlocked';
+  message: string;
+  /** Whether this alert belongs in the sticky top banner (critical) or only on the card. */
+  banner: boolean;
 }
 
-export interface CachedDeviceState {
+export interface DeviceReading {
+  key: string;
+  label: string;
+  value: string;
+}
+
+export type CommandFn = (
+  deviceId: string,
+  command: string,
+  value?: string | number,
+  optimistic?: Record<string, AttributeValue>,
+) => Promise<boolean>;
+
+export interface DeviceSnapshot {
   devices: Device[];
-  lastUpdated: number;
   stale: boolean;
+  lastUpdated: string | null;
+  mode: HubitatMode;
 }
 
-export type DeviceCategory = 'all' | 'lights' | 'sensors' | 'locks' | 'climate' | 'other';
+export type ServerMessage =
+  | { type: 'auth_ok'; mode: HubitatMode }
+  | ({ type: 'snapshot' } & DeviceSnapshot)
+  | { type: 'update'; devices: Device[]; removed: string[]; stale: boolean; lastUpdated: string | null }
+  | { type: 'status'; stale: boolean; lastUpdated: string | null }
+  | { type: 'commandResult'; requestId: string; ok: boolean; error?: string }
+  | { type: 'error'; error: string }
+  | { type: 'pong' };
 
-export interface CommandRequest {
-  command: string;
-  value?: string | number;
-}
-
-export type WsConnectionStatus = 'connecting' | 'connected' | 'disconnected' | 'reconnecting';
-
-// Messages sent TO the server over WS
-export type WsOutgoing =
+export type ClientMessage =
   | { type: 'auth'; token: string }
-  | { type: 'ping' }
-  | { type: 'command'; payload: { deviceId: string; command: string; value?: string | number } };
-
-// Messages received FROM the server over WS
-export type WsIncoming =
-  | { type: 'authOk' }
-  | { type: 'pong' }
-  | { type: 'error'; payload: string }
-  | { type: 'fullState'; payload: CachedDeviceState }
-  | { type: 'deviceUpdates'; payload: DeviceUpdate[] };
+  | { type: 'command'; requestId: string; deviceId: string; command: string; value?: string | number }
+  | { type: 'ping' };

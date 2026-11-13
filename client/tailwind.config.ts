@@ -1,24 +1,39 @@
 import type { Config } from 'tailwindcss';
 
 export default {
-  content: ['./index.html', './src/**/*.{js,ts,jsx,tsx}'],
+  content: ['./index.html', './src/**/*.{ts,tsx}'],
   theme: {
     extend: {
       colors: {
-        background: '#0f0f1a',
-        surface: '#161625',
-        'surface-2': '#1e1e32',
-        border: 'rgba(255,255,255,0.08)',
-        accent: '#5b6af5',
-        'accent-hover': '#4a59e8',
-        muted: 'rgba(255,255,255,0.45)',
+        base: {
+          DEFAULT: '#1a1a2e',
+          deep: '#13132a',
+          raised: '#232343',
+        },
+        accent: {
+          DEFAULT: '#8b7cf6',
+          soft: '#b4aaff',
+          deep: '#6c5ce7',
+        },
       },
       fontFamily: {
-        sans: ['DM Sans', 'system-ui', 'sans-serif'],
-        mono: ['Geist Mono', 'ui-monospace', 'monospace'],
+        sans: ['"DM Sans"', 'system-ui', '-apple-system', 'Segoe UI', 'sans-serif'],
+        mono: ['"Geist Mono"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
       },
-      backdropBlur: {
-        xs: '4px',
+      keyframes: {
+        glow: {
+          '0%': { boxShadow: '0 0 0 0 rgba(139, 124, 246, 0)' },
+          '30%': { boxShadow: '0 0 28px 2px rgba(139, 124, 246, 0.45)' },
+          '100%': { boxShadow: '0 0 0 0 rgba(139, 124, 246, 0)' },
+        },
+        'fade-in': {
+          '0%': { opacity: '0', transform: 'translateY(4px)' },
+          '100%': { opacity: '1', transform: 'translateY(0)' },
+        },
+      },
+      animation: {
+        glow: 'glow 1.2s ease-out',
+        'fade-in': 'fade-in 0.3s ease',
       },
     },
   },
