@@ -70,9 +70,92 @@ export type ServerMessage =
   | { type: 'status'; stale: boolean; lastUpdated: string | null }
   | { type: 'commandResult'; requestId: string; ok: boolean; error?: string }
   | { type: 'error'; error: string }
+  | { type: 'automation'; log: AutomationLog }
   | { type: 'pong' };
 
 export type ClientMessage =
   | { type: 'auth'; token: string }
   | { type: 'command'; requestId: string; deviceId: string; command: string; value?: string | number }
   | { type: 'ping' };
+
+/* ------------------------------------------------------------------ */
+/* Rule Machine                                                        */
+/* ------------------------------------------------------------------ */
+
+export interface RuleSummary {
+  id: string;
+  name: string;
+  paused: boolean;
+}
+
+export type RuleAction = 'run' | 'evaluate' | 'pause' | 'resume';
+
+/* ------------------------------------------------------------------ */
+/* Native automations                                                  */
+/* ------------------------------------------------------------------ */
+
+export type DayOfWeek = 'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat' | 'sun';
+
+export interface AutomationTrigger {
+  type: 'device_state' | 'schedule' | 'time_of_day';
+  deviceId?: string;
+  attribute?: string;
+  value?: string;
+  cron?: string;
+  time?: string;
+  days?: DayOfWeek[];
+}
+
+export type ConditionOperator = 'equals' | 'not_equals' | 'greater_than' | 'less_than' | 'after' | 'before';
+
+export interface AutomationCondition {
+  type?: 'device' | 'time' | 'sun';
+  deviceId?: string;
+  attribute?: string;
+  operator: ConditionOperator;
+  value: string;
+}
+
+export interface AutomationAction {
+  type: 'device_command' | 'delay';
+  deviceId?: string;
+  command?: string;
+  value?: string | number;
+  seconds?: number;
+}
+
+export interface Automation {
+  id: string;
+  name: string;
+  enabled: boolean;
+  trigger: AutomationTrigger;
+  conditions?: AutomationCondition[];
+  actions: AutomationAction[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type AutomationDraft = Omit<Automation, 'id' | 'createdAt' | 'updatedAt'>;
+
+export interface AutomationActionResult {
+  description: string;
+  success: boolean;
+  error?: string;
+}
+
+export interface AutomationLog {
+  id: string;
+  automationId: string;
+  automationName: string;
+  triggeredAt: string;
+  triggerReason: string;
+  actions: AutomationActionResult[];
+}
+
+export interface AutomationMeta {
+  timezone: string;
+  sunConditionsAvailable: boolean;
+}
+
+/** Device categories plus the two non-device views. */
+export type DashboardView = CategoryFilter | 'automations' | 'rules';

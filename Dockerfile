@@ -29,7 +29,10 @@ RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build /app/client/dist client/dist
 COPY --from=build /app/server/dist server/dist
 
-RUN chown -R node:node /app
+# Automation storage (data/automations.json). Persist it by mounting a volume at /app/data:
+# docker-compose.yml does this for NAS deployments; on Railway attach a volume at /app/data.
+# There is deliberately no VOLUME instruction here: Railway rejects Dockerfiles that use it.
+RUN mkdir -p /app/data && chown -R node:node /app
 USER node
 
 EXPOSE 3001

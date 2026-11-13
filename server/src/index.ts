@@ -8,10 +8,14 @@ import { ConfigError, loadConfig, type AppConfig } from './config.js';
 import { HubitatClient } from './services/hubitat.js';
 import { DeviceCache } from './services/deviceCache.js';
 import { WsManager } from './services/wsManager.js';
+import { RuleClient } from './services/rules.js';
+import { AutomationEngine } from './services/automationEngine.js';
 import { apiLimiter } from './middleware/rateLimit.js';
 import { createAuthRouter } from './routes/auth.js';
 import { createDevicesRouter } from './routes/devices.js';
 import { createHealthRouter } from './routes/health.js';
+import { createRulesRouter } from './routes/rules.js';
+import { createAutomationsRouter } from './routes/automations.js';
 
 const SESSION_COOKIE = 'hubidash.sid';
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
@@ -32,6 +36,14 @@ const port = parseInt(process.env.PORT || '3001', 10);
 
 const hubitat = new HubitatClient(config.hubitat);
 const cache = new DeviceCache(hubitat, config.pollIntervalMs);
+const rules = new RuleClient(config.ruleMachine);
+const automations = new AutomationEngine({
+  client: hubitat,
+  cache,
+  dataDir: config.dataDir,
+  timezone: config.timezone,
+  location: config.location,
+});
 const passwordHash = bcrypt.hashSync(config.authPassword, 10);
 const sessionStore = new session.MemoryStore();
 
@@ -41,7 +53,7 @@ const app = express();
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
 
-app.use(express.json({ limit: '10kb' }));
+app.use(express.json({ limit: '32kb' }));
 app.use(
   session({
     name: SESSION_COOKIE,
@@ -62,6 +74,7 @@ app.use(
 );
 
 const wsManager = new WsManager({ sessionStore, cache, client: hubitat });
+automations.on('executed', (log) => wsManager.notifyAutomation(log));
 
 app.use('/api', apiLimiter);
 app.use('/api', createHealthRouter(hubitat.mode));
@@ -75,6 +88,8 @@ app.use(
   }),
 );
 app.use('/api/devices', createDevicesRouter(hubitat, cache));
+app.use('/api/rules', createRulesRouter(rules));
+app.use('/api/automations', createAutomationsRouter(automations));
 app.use('/api', (_req, res) => {
   res.status(404).json({ error: 'Not found' });
 });
@@ -112,12 +127,19 @@ app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
 const server = http.createServer(app);
 wsManager.attach(server);
 
+await automations.init();
+
 server.listen(port, '0.0.0.0', () => {
   console.log(`[server] HubiDash listening on port ${port} (${hubitat.mode} mode, poll ${config.pollIntervalMs}ms)`);
+  console.log(
+    `[server] Rule Machine: ${rules.configured ? 'enabled' : 'not configured'} · timezone ${config.timezone}` +
+      ` · sun conditions ${config.location ? 'enabled' : 'off (set LATITUDE/LONGITUDE)'}`,
+  );
 });
 
 function shutdown(signal: string): void {
   console.log(`[server] ${signal} received, shutting down`);
+  automations.stop();
   wsManager.close();
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 5_000).unref();

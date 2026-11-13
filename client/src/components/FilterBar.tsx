@@ -1,6 +1,6 @@
-import type { CategoryFilter } from '../types/devices';
+import type { DashboardView } from '../types/devices';
 
-const TABS: Array<{ id: CategoryFilter; label: string }> = [
+const DEVICE_TABS: Array<{ id: DashboardView; label: string }> = [
   { id: 'all', label: 'All' },
   { id: 'lights', label: 'Lights' },
   { id: 'sensors', label: 'Sensors' },
@@ -10,40 +10,59 @@ const TABS: Array<{ id: CategoryFilter; label: string }> = [
 ];
 
 interface FilterBarProps {
-  category: CategoryFilter;
-  onCategoryChange: (category: CategoryFilter) => void;
+  view: DashboardView;
+  onViewChange: (view: DashboardView) => void;
   search: string;
   onSearchChange: (search: string) => void;
-  counts: Record<CategoryFilter, number>;
+  counts: Partial<Record<DashboardView, number>>;
+  /** The Rules tab only appears when Rule Machine is configured on the server. */
+  showRules: boolean;
 }
 
-export function FilterBar({ category, onCategoryChange, search, onSearchChange, counts }: FilterBarProps) {
+export function FilterBar({ view, onViewChange, search, onSearchChange, counts, showRules }: FilterBarProps) {
+  const tabs: Array<{ id: DashboardView; label: string }> = [
+    ...DEVICE_TABS,
+    { id: 'automations', label: 'Automations' },
+    ...(showRules ? [{ id: 'rules' as const, label: 'Rules' }] : []),
+  ];
+
+  const placeholder =
+    view === 'automations' ? 'Search automations…' : view === 'rules' ? 'Search rules…' : 'Search devices…';
+
   return (
     <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
       <div
         role="tablist"
-        aria-label="Device categories"
+        aria-label="Dashboard views"
         className="-mx-4 flex gap-1.5 overflow-x-auto px-4 pb-1 md:mx-0 md:px-0 md:pb-0"
       >
-        {TABS.map((tab) => {
-          const selected = tab.id === category;
+        {tabs.map((tab) => {
+          const selected = tab.id === view;
+          const isView = tab.id === 'automations' || tab.id === 'rules';
+          const count = counts[tab.id];
           return (
             <button
               key={tab.id}
               type="button"
               role="tab"
               aria-selected={selected}
-              onClick={() => onCategoryChange(tab.id)}
+              onClick={() => onViewChange(tab.id)}
               className={`flex shrink-0 items-center gap-2 rounded-full border px-3.5 py-1.5 text-sm transition-all duration-300 ease-in-out ${
+                tab.id === 'automations' ? 'md:ml-2' : ''
+              } ${
                 selected
                   ? 'border-accent/50 bg-accent/20 text-white'
-                  : 'border-white/10 bg-white/[0.03] text-slate-400 hover:bg-white/[0.07] hover:text-slate-200'
+                  : `bg-white/[0.03] text-slate-400 hover:bg-white/[0.07] hover:text-slate-200 ${
+                      isView ? 'border-accent/20' : 'border-white/10'
+                    }`
               }`}
             >
               {tab.label}
-              <span className={`font-mono text-xs tabular-nums ${selected ? 'text-accent-soft' : 'text-slate-500'}`}>
-                {counts[tab.id]}
-              </span>
+              {count !== undefined && (
+                <span className={`font-mono text-xs tabular-nums ${selected ? 'text-accent-soft' : 'text-slate-500'}`}>
+                  {count}
+                </span>
+              )}
             </button>
           );
         })}
@@ -65,8 +84,8 @@ export function FilterBar({ category, onCategoryChange, search, onSearchChange, 
           type="search"
           value={search}
           onChange={(e) => onSearchChange(e.target.value)}
-          placeholder="Search devices…"
-          aria-label="Search devices by name"
+          placeholder={placeholder}
+          aria-label={placeholder.replace('…', '')}
           className="w-full rounded-xl border border-white/10 bg-white/[0.04] py-2 pl-9 pr-3 text-sm text-slate-100 placeholder:text-slate-500 transition-all duration-300 ease-in-out focus:border-accent/50 focus:bg-white/[0.06]"
         />
       </div>

@@ -7,6 +7,8 @@ A real-time dashboard and remote control for a **Hubitat Elevation** hub, built 
 - Alerts for water leaks, critical battery (<20%), smoke/CO, and unlocked doors.
 - Two hub modes: **cloud** (through `cloud.hubitat.com`, works from anywhere) or **local** (direct LAN). Switch between them by changing `HUBITAT_MODE`.
 - Login with one password. The session cookie lasts 30 days.
+- **Automations:** simple if/then rules that HubiDash runs itself. They trigger on a device state, a cron schedule or a time of day, can have optional "only if" conditions, and send commands through the Maker API.
+- **Rule Machine** (optional): list your hub's Rule Machine rules and run, pause or resume them.
 
 ```
 React SPA ◄──WSS──► Express + ws ──► Hubitat hub (LAN)          [local]
@@ -37,8 +39,45 @@ Copy `.env.example` to `.env` and fill it in. The file documents every variable.
 | `AUTH_PASSWORD` | both | Dashboard password, bcrypt-hashed at startup |
 | `SESSION_SECRET` | both | Cookie signing secret (`openssl rand -hex 32`) |
 | `PORT` | both | HTTP port; default `3001`, Railway sets its own |
+| `RULE_MACHINE_URL` | optional | Rule Machine endpoint base, e.g. `https://cloud.hubitat.com/api/<hubId>/apps/<rmAppId>` |
+| `RULE_MACHINE_TOKEN` | optional | Rule Machine's own access token (not the Maker API token) |
+| `TIMEZONE` | optional | IANA timezone for schedules, e.g. `America/New_York`; defaults to the server's (UTC on Railway) |
+| `LATITUDE` / `LONGITUDE` | optional | Hub location; enables "only if it's dark/light" conditions |
+| `DATA_DIR` | optional | Where `automations.json` lives; default `data/` (`/app/data` in Docker) |
 
-The server checks its configuration at startup. If anything is missing it exits with a clear error.
+The server checks its configuration at startup. If anything is missing it exits with a clear error. The Rule Machine variables are optional: when they aren't set, the Rules tab is hidden.
+
+## Automations
+
+Open the **Automations** tab and press **+**. Each automation has three parts:
+
+- **When:** a device attribute changes to a value (e.g. *Basement Leak → water: wet*), a cron schedule (presets for hourly, daily or weekdays, or a custom expression), or a time of day on chosen weekdays.
+- **Only if** (optional, all must be true): a device attribute is, is not, is above, or is below a value; the time is after or before HH:MM; or it is dark or light outside (needs `LATITUDE`/`LONGITUDE`).
+- **Then:** an ordered list of device commands and waits. Reorder them by dragging, or with the arrows on mobile.
+
+Behaviour to know about:
+
+- **Command path:** actions use the same path as the dashboard's own controls, so every command is a GET to the Maker API. If one action fails, it is logged and the remaining actions still run.
+- **Repeat protection:** an automation won't re-trigger within 5 s of finishing, so its own actions can't loop it.
+- **Background polling:** while at least one device-triggered automation is enabled, the server keeps polling the hub even with no browser open (every 8 s in cloud mode, 5 s in local).
+- **Test:** runs the actions immediately and skips conditions. This works in the editor before you save, too.
+- **Run log:** the last 100 runs are kept in memory and shown on each card. Live toasts appear in any open dashboard.
+
+**Persistence:** automations are saved to `data/automations.json` using atomic writes.
+- **docker compose:** it mounts the `hubidash-data` volume at `/app/data`.
+- **Railway:** without a volume, automations are lost on every redeploy. To keep them, add a volume mounted at `/app/data` and set the variable `RAILWAY_RUN_UID=0`; Railway volumes are owned by root, and the container runs as a non-root user.
+
+## Rule Machine
+
+Rule Machine has its own endpoint and token, separate from Maker API. Set `RULE_MACHINE_URL` (the base URL up to and including the Rule Machine app ID) and `RULE_MACHINE_TOKEN`. If you paste a full endpoint URL that ends in `/trigger?access_token=…`, the extra part is stripped automatically.
+
+The Rules tab lists rules from `getRuleList` and calls these endpoints:
+- `trigger/runRuleAct=<id>`: Run
+- `trigger/runRule=<id>`: Evaluate
+- `trigger/pauseRule=<id>`: Pause
+- `trigger/resumeRule=<id>`: Resume
+
+A rule's paused state comes from the "(Paused)" marker Hubitat adds to paused rule names.
 
 ## Development
 
@@ -96,10 +135,23 @@ All routes are under `/api`, rate-limited to 100 requests/min per IP. Login allo
 | GET | `/api/devices` | cookie | `{ devices, stale, lastUpdated, mode }` |
 | GET | `/api/devices/:id` | cookie | `{ device, stale }` |
 | POST | `/api/devices/:id/command` | cookie | `{ command, value? }` |
+| GET | `/api/rules/status` | cookie | `{ configured }` |
+| GET | `/api/rules` | cookie | `[{ id, name, paused }]`, or `[]` when not configured |
+| POST | `/api/rules/:id/run` · `evaluate` · `pause` · `resume` | cookie | Rule Machine actions |
+| GET | `/api/automations` | cookie | All automations |
+| GET | `/api/automations/:id` | cookie | One automation |
+| POST | `/api/automations` | cookie | Create (body without `id` or timestamps) |
+| PUT | `/api/automations/:id` | cookie | Update |
+| DELETE | `/api/automations/:id` | cookie | Delete |
+| POST | `/api/automations/:id/toggle` | cookie | Flip enabled, or pass `{ enabled }` |
+| POST | `/api/automations/:id/test` | cookie | Run the actions now; returns the log entry |
+| POST | `/api/automations/test` | cookie | Test an unsaved draft |
+| GET | `/api/automations/log` | cookie | The last 50 runs, newest first |
+| GET | `/api/automations/meta` | cookie | `{ timezone, sunConditionsAvailable }` |
 
 If the hub can't be reached, device endpoints return the last known state with `stale: true`.
 
-**WebSocket** (`/ws`): the client sends `{ type: "auth", token }` within 5 s of connecting. The server then sends `auth_ok` and a `snapshot`, followed by `update` messages (only changed devices) and `status` messages. The client can send commands as `{ type: "command", requestId, deviceId, command, value? }` and gets a `commandResult` back.
+**WebSocket** (`/ws`): the client sends `{ type: "auth", token }` within 5 s of connecting. The server then sends `auth_ok` and a `snapshot`, followed by `update` messages (only changed devices), `status` messages, and `automation` messages (one per automation run). The client can send commands as `{ type: "command", requestId, deviceId, command, value? }` and gets a `commandResult` back.
 
 Every Maker API call, commands included, is an HTTP **GET**. Command responses are read and discarded without JSON parsing, because the hub often returns HTML or an empty body.
 
@@ -111,4 +163,9 @@ server/   Express + ws backend (TypeScript, ESM)
   services/hubitat.ts      Maker API client (local/cloud URLs, GET-only commands)
   services/deviceCache.ts  polling, diffing, stale fallback
   services/wsManager.ts    /ws upgrade, token auth, broadcast
+  services/rules.ts        optional Rule Machine client
+  services/automationEngine.ts  triggers, conditions, actions, persistence, run log
+  services/automationValidation.ts  input validation for automations
+  services/sunTimes.ts     sunrise/sunset maths for dark/light conditions
+data/     automations.json (created at runtime, gitignored)
 ```

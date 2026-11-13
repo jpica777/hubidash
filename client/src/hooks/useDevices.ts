@@ -30,6 +30,8 @@ interface PendingRequest {
 interface UseDevicesOptions {
   wsToken: string;
   onUnauthorized: () => void;
+  /** Receives server events that aren't device state (e.g. automation runs). */
+  onServerEvent?: (msg: ServerMessage) => void;
 }
 
 export interface UseDevicesResult {
@@ -59,7 +61,11 @@ function removeOp(overlays: Overlays, deviceId: string, opId: number): Overlays 
   return result;
 }
 
-export function useDevices({ wsToken, onUnauthorized }: UseDevicesOptions): UseDevicesResult {
+export function useDevices({ wsToken, onUnauthorized, onServerEvent }: UseDevicesOptions): UseDevicesResult {
+  const onServerEventRef = useRef(onServerEvent);
+  useEffect(() => {
+    onServerEventRef.current = onServerEvent;
+  }, [onServerEvent]);
   const [serverDevices, setServerDevices] = useState<Map<string, Device>>(() => new Map());
   const [overlays, setOverlays] = useState<Overlays>({});
   const [loaded, setLoaded] = useState(false);
@@ -107,6 +113,9 @@ export function useDevices({ wsToken, onUnauthorized }: UseDevicesOptions): UseD
           }
           break;
         }
+        case 'automation':
+          onServerEventRef.current?.(msg);
+          break;
         default:
           break;
       }

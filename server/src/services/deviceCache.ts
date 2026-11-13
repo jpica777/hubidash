@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import type { HubitatClient } from './hubitat.js';
-import type { CacheStatus, Device, DeviceChanges, DeviceSnapshot } from '../types/index.js';
+import type { AttributeChange, CacheStatus, Device, DeviceChanges, DeviceSnapshot } from '../types/index.js';
 
 function fingerprint(device: Device): string {
   return JSON.stringify([
@@ -17,6 +17,21 @@ function fingerprint(device: Device): string {
 export interface DeviceCacheEvents {
   changes: [DeviceChanges];
   status: [CacheStatus];
+  /** Per-attribute changes on devices that were already known (never fired for the initial load). */
+  attributeChanges: [AttributeChange[]];
+}
+
+function attributeChanges(previous: Device, next: Device): AttributeChange[] {
+  const result: AttributeChange[] = [];
+  const keys = new Set([...Object.keys(previous.attributes), ...Object.keys(next.attributes)]);
+  for (const attribute of keys) {
+    const before = previous.attributes[attribute] ?? null;
+    const after = next.attributes[attribute] ?? null;
+    if (String(before) !== String(after)) {
+      result.push({ deviceId: next.id, deviceName: next.label, attribute, value: after, previous: before });
+    }
+  }
+  return result;
 }
 
 /**
@@ -33,6 +48,7 @@ export class DeviceCache extends EventEmitter<DeviceCacheEvents> {
 
   private pollGeneration = 0;
   private polling = false;
+  private readonly pollingDemand = new Set<string>();
   private pollTimer: NodeJS.Timeout | null = null;
   private soonTimer: NodeJS.Timeout | null = null;
 
@@ -91,6 +107,7 @@ export class DeviceCache extends EventEmitter<DeviceCacheEvents> {
     try {
       const devices = await this.client.getAllDevices();
       const changed: Device[] = [];
+      const attrChanges: AttributeChange[] = [];
       const seen = new Set<string>();
 
       for (const device of devices) {
@@ -99,6 +116,8 @@ export class DeviceCache extends EventEmitter<DeviceCacheEvents> {
         if (this.fingerprints.get(device.id) !== fp) {
           this.fingerprints.set(device.id, fp);
           changed.push(device);
+          const previous = this.devices.get(device.id);
+          if (previous) attrChanges.push(...attributeChanges(previous, device));
         }
         this.devices.set(device.id, device);
       }
@@ -121,6 +140,7 @@ export class DeviceCache extends EventEmitter<DeviceCacheEvents> {
       } else {
         this.emit('status', this.status());
       }
+      if (attrChanges.length > 0) this.emit('attributeChanges', attrChanges);
       return true;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -131,7 +151,18 @@ export class DeviceCache extends EventEmitter<DeviceCacheEvents> {
     }
   }
 
-  startPolling(): void {
+  /**
+   * Polling runs while at least one source needs it: live dashboard clients ("ws")
+   * or enabled device-state automations ("automations").
+   */
+  setPollingDemand(source: string, active: boolean): void {
+    if (active) this.pollingDemand.add(source);
+    else this.pollingDemand.delete(source);
+    if (this.pollingDemand.size > 0) this.startPolling();
+    else this.stopPolling();
+  }
+
+  private startPolling(): void {
     if (this.polling) return;
     this.polling = true;
     const generation = ++this.pollGeneration;
@@ -155,7 +186,7 @@ export class DeviceCache extends EventEmitter<DeviceCacheEvents> {
     if (this.soonTimer) clearTimeout(this.soonTimer);
     this.pollTimer = null;
     this.soonTimer = null;
-    console.log('[cache] polling paused (no live clients)');
+    console.log('[cache] polling paused (no live clients or device-triggered automations)');
   }
 
   /** Schedules a quick out-of-band refresh, e.g. right after a command so clients see the result fast. */

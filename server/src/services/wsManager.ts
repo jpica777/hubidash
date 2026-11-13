@@ -5,7 +5,7 @@ import { WebSocket, WebSocketServer, type RawData } from 'ws';
 import type { DeviceCache } from './deviceCache.js';
 import type { HubitatClient } from './hubitat.js';
 import { CommandError, executeCommand, parseCommandInput } from './commands.js';
-import type { ClientMessage, ServerMessage } from '../types/index.js';
+import type { AutomationLog, ClientMessage, ServerMessage } from '../types/index.js';
 
 const WS_PATH = '/ws';
 const AUTH_TIMEOUT_MS = 5_000;
@@ -214,8 +214,12 @@ export class WsManager {
 
   private updatePolling(): void {
     const hasLiveClients = [...this.clients.values()].some((s) => s.authed);
-    if (hasLiveClients) this.deps.cache.startPolling();
-    else this.deps.cache.stopPolling();
+    this.deps.cache.setPollingDemand('ws', hasLiveClients);
+  }
+
+  /** Tells every connected dashboard that an automation ran. */
+  notifyAutomation(log: AutomationLog): void {
+    this.broadcast({ type: 'automation', log });
   }
 
   private send(ws: WebSocket, msg: ServerMessage): void {
